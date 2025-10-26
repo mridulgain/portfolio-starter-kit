@@ -4,38 +4,87 @@ import path from 'path'
 type Metadata = {
   title: string
   publishedAt: string
-  summary: string
+  summary?: string
   image?: string
+  [key: string]: any
+}
+
+export type Post = {
+  metadata: Metadata
+  slug: string
+  content: string
 }
 
 function parseFrontmatter(fileContent: string) {
-  let frontmatterRegex = /---\s*([\s\S]*?)\s*---/
+  // frontmatter block at top between --- ... ---
+  let frontmatterRegex = /^---\s*([\s\S]*?)\s*---\s*/
   let match = frontmatterRegex.exec(fileContent)
-  let frontMatterBlock = match![1]
-  let content = fileContent.replace(frontmatterRegex, '').trim()
-  let frontMatterLines = frontMatterBlock.trim().split('\n')
-  let metadata: Partial<Metadata> = {}
 
-  frontMatterLines.forEach((line) => {
-    let [key, ...valueArr] = line.split(': ')
-    let value = valueArr.join(': ').trim()
-    value = value.replace(/^['"](.*)['"]$/, '$1') // Remove quotes
-    metadata[key.trim() as keyof Metadata] = value
-  })
+  // defaults when no frontmatter present
+  let metadata: Partial<Metadata> = {
+    title: 'Untitled',
+    publishedAt: new Date().toISOString(),
+    summary: '',
+  }
+  let content = fileContent.trim()
+
+  if (match) {
+    let frontMatterBlock = match[1]
+    content = fileContent.slice(match[0].length).trim()
+
+    let frontMatterLines = frontMatterBlock.split(/\r?\n/).map((l) => l.trim())
+
+    frontMatterLines.forEach((line) => {
+      if (!line || !line.includes(':')) return
+      // split only at first colon to allow ":" in values
+      let idx = line.indexOf(':')
+      let key = line.slice(0, idx).trim()
+      let value = line.slice(idx + 1).trim()
+      // remove surrounding single/double quotes
+      value = value.replace(/^['"]|['"]$/g, '')
+      if (key) {
+        metadata[key as keyof Metadata] = value
+      }
+    })
+  }
 
   return { metadata: metadata as Metadata, content }
 }
 
-function getMDXFiles(dir) {
-  return fs.readdirSync(dir).filter((file) => path.extname(file) === '.mdx')
+function getMDXFiles(dir: string) {
+  try {
+    if (!fs.existsSync(dir)) return []
+    return fs
+      .readdirSync(dir)
+      .filter((file) => {
+        const ext = path.extname(file).toLowerCase()
+        return ext === '.mdx' || ext === '.md'
+      })
+  } catch (err) {
+    console.error('getMDXFiles error', err)
+    return []
+  }
 }
 
-function readMDXFile(filePath) {
-  let rawContent = fs.readFileSync(filePath, 'utf-8')
-  return parseFrontmatter(rawContent)
+function readMDXFile(filePath: string) {
+  try {
+    let rawContent = fs.readFileSync(filePath, 'utf-8')
+    return parseFrontmatter(rawContent)
+  } catch (err) {
+    console.error('readMDXFile error', filePath, err)
+    // return a minimal fallback so calling code doesn't crash
+    return {
+      metadata: {
+        title: path.basename(filePath),
+        publishedAt: new Date().toISOString(),
+        summary: '',
+      } as Metadata,
+      content: '',
+    }
+  }
 }
 
-function getMDXData(dir) {
+function getMDXData(dir: string) {
   let mdxFiles = getMDXFiles(dir)
   return mdxFiles.map((file) => {
     let { metadata, content } = readMDXFile(path.join(dir, file))
@@ -45,35 +94,58 @@ function getMDXData(dir) {
       metadata,
       slug,
       content,
-    }
+    } as Post
   })
 }
 
+let cachedPosts: Post[] | null = null
+
 export function getBlogPosts() {
-  return getMDXData(path.join(process.cwd(), 'app', 'blog', 'posts'))
+  if (cachedPosts) return cachedPosts
+  const posts = getMDXData(path.join(process.cwd(), 'app', 'blog', 'posts')).filter(Boolean)
+  // sort descending by publishedAt safely
+  posts.sort((a, b) => {
+    const ta = new Date(a.metadata.publishedAt).getTime() || 0
+    const tb = new Date(b.metadata.publishedAt).getTime() || 0
+    return tb - ta
+  })
+  cachedPosts = posts
+  return cachedPosts
 }
 
 export function formatDate(date: string, includeRelative = false) {
-  let currentDate = new Date()
+  if (!date) return ''
+  // ensure ISO-ish string for Date parsing
   if (!date.includes('T')) {
     date = `${date}T00:00:00`
   }
   let targetDate = new Date(date)
+  if (isNaN(targetDate.getTime())) {
+    return date
+  }
 
-  let yearsAgo = currentDate.getFullYear() - targetDate.getFullYear()
-  let monthsAgo = currentDate.getMonth() - targetDate.getMonth()
-  let daysAgo = currentDate.getDate() - targetDate.getDate()
+  let now = Date.now()
+  let diffMs = now - targetDate.getTime()
+  let diffSeconds = Math.round(Math.abs(diffMs) / 1000)
+  let diffMinutes = Math.round(diffSeconds / 60)
+  let diffHours = Math.round(diffMinutes / 60)
+  let diffDays = Math.round(diffHours / 24)
+  let diffMonths = Math.round(diffDays / 30)
+  let diffYears = Math.round(diffDays / 365)
 
-  let formattedDate = ''
-
-  if (yearsAgo > 0) {
-    formattedDate = `${yearsAgo}y ago`
-  } else if (monthsAgo > 0) {
-    formattedDate = `${monthsAgo}mo ago`
-  } else if (daysAgo > 0) {
-    formattedDate = `${daysAgo}d ago`
+  let relative = ''
+  if (diffYears > 0) {
+    relative = `${diffYears}y ago`
+  } else if (diffMonths > 0) {
+    relative = `${diffMonths}mo ago`
+  } else if (diffDays > 0) {
+    relative = `${diffDays}d ago`
+  } else if (diffHours > 0) {
+    relative = `${diffHours}h ago`
+  } else if (diffMinutes > 0) {
+    relative = `${diffMinutes}m ago`
   } else {
-    formattedDate = 'Today'
+    relative = 'Just now'
   }
 
   let fullDate = targetDate.toLocaleString('en-us', {
@@ -86,5 +158,5 @@ export function formatDate(date: string, includeRelative = false) {
     return fullDate
   }
 
-  return `${fullDate} (${formattedDate})`
+  return `${fullDate} (${relative})`
 }
